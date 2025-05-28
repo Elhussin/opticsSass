@@ -11,7 +11,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
 from pathlib import Path
-
+import os
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -71,7 +71,7 @@ WSGI_APPLICATION = 'opticsSaas.wsgi.application'
 
 
 
-DATABASE_ROUTERS = ['routers.db_router.TenantRouter']
+# DATABASE_ROUTERS = ['routers.db_router.TenantRouter']
 
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
@@ -86,13 +86,19 @@ DATABASE_ROUTERS = ['routers.db_router.TenantRouter']
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'core_db',
-        'USER': 'postgres',
-        'PASSWORD': 'postgres',
-        'HOST': 'localhost',
-        'PORT': '5432',
+        'NAME': os.getenv('DB_NAME'),
+        'USER': os.getenv('DB_USER'),
+        'PASSWORD': os.getenv('DB_PASSWORD'),
+        'HOST': os.getenv('DB_HOST'),
+        'PORT': os.getenv('DB_PORT'),
     }
 }
+
+
+
+DATABASE_ROUTERS = ['routers.db_router.TenantRouter']
+AUTH_USER_MODEL = 'tenant.CustomUser'
+
 
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
