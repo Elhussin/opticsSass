@@ -1,0 +1,347 @@
+// next.config.js - إعداد Next.js للـ Multi-Tenant
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  // تمكين rewrites للتعامل مع الـ subdomains
+  async rewrites() {
+    return [
+      // إعادة توجيه API calls للخادم الخلفي
+      {
+        source: '/api/:path*',
+        destination: `${process.env.BACKEND_URL}/api/:path*`,
+      },
+    ];
+  },
+  
+  // معالجة الـ domains والـ subdomains
+  async headers() {
+    return [
+      {
+        source: '/(.*)',
+        headers: [
+          {
+            key: 'X-Frame-Options',
+            value: 'SAMEORIGIN',
+          },
+          {
+            key: 'X-Content-Type-Options',
+            value: 'nosniff',
+          },
+        ],
+      },
+    ];
+  },
+  
+  // تحسينات الأداء
+  experimental: {
+    optimizeCss: true,
+    scrollRestoration: true,
+  },
+  
+  // إعدادات الصور
+  images: {
+    domains: ['your-cdn-domain.com'],
+    formats: ['image/webp', 'image/avif'],
+  },
+};
+
+module.exports = nextConfig;
+
+// lib/tenant.ts - إدارة العميل في Frontend
+interface Tenant {
+  id: string;
+  name: string;
+  subdomain: string;
+  plan: 'free' | 'basic' | 'premium' | 'enterprise';
+  features: Record<string, boolean>;
+  branding: {
+    logo?: string;
+    primary_color?: string;
+    secondary_color?: string;
+    custom_css?: string;
+  };
+}
+
+interface TenantUser {
+  id: string;
+  email: string;
+  role: 'admin' | 'manager' | 'employee';
+  permissions: string[];
+}
+
+class TenantContext {
+  private static instance: TenantContext;
+  private tenant: Tenant | null = null;
+  private user: TenantUser | null = null;
+  
+  static getInstance(): TenantContext {
+    if (!TenantContext.instance) {
+      TenantContext.instance = new TenantContext();
+    }
+    return TenantContext.instance;
+  }
+  
+  // استخراج الـ subdomain من URL
+  extractSubdomain(): string | null {
+    if (typeof window === 'undefined') return null;
+    
+    const hostname = window.location.hostname;
+    const parts = hostname.split('.');
+    
+    // تجاهل localhost في التطوير
+    if (hostname === 'localhost' || hostname === '127.0.0.1') {
+      return null;
+    }
+    
+    // استخراج الـ subdomain
+    if (parts.length >= 3) {
+      const subdomain = parts[0];
+      // تجاهل www
+      return subdomain === 'www' ? null : subdomain;
+    }
+    
+    return null;
+  }
+  
+  // تحميل معلومات العميل
+  async loadTenant(): Promise<Tenant | null> {
+    const subdomain = this.extractSubdomain();
+    if (!subdomain) return null;
+    
+    try {
+      const response = await fetch(`/api/tenant/${subdomain}`, {
+        credentials: 'include',
+      });
+      
+      if (response.ok) {
+        this.tenant = await response.json();
+        // تطبيق العلامة التجارية المخصصة
+        this.applyTenantBranding();
+        return this.tenant;
+      }
+    } catch (error) {
+      console.error('خطأ في تحميل معلومات العميل:', error);
+    }
+    
+    return null;
+  }
+  
+  // تطبيق العلامة التجارية المخصصة
+  private applyTenantBranding(): void {
+    if (!this.tenant?.branding) return;
+    
+    const { primary_color, secondary_color, custom_css } = this.tenant.branding;
+    
+    // تطبيق الألوان المخصصة
+    if (primary_color) {
+      document.documentElement.style.setProperty('--primary-color', primary_color);
+    }
+    if (secondary_color) {
+      document.documentElement.style.setProperty('--secondary-color', secondary_color);
+    }
+    
+    // تطبيق CSS مخصص
+    if (custom_css) {
+      const styleElement = document.createElement('style');
+      styleElement.textContent = custom_css;
+      document.head.appendChild(styleElement);
+    }
+  }
+  
+  // فحص الميزات المتاحة
+  hasFeature(featureName: string): boolean {
+    return this.tenant?.features[featureName] || false;
+  }
+  
+  // فحص الصلاحيات
+  hasPermission(permission: string): boolean {
+    return this.user?.permissions.includes(permission) || false;
+  }
+  
+  // الحصول على معلومات العميل
+  getTenant(): Tenant | null {
+    return this.tenant;
+  }
+  
+  // تسجيل دخول المستخدم
+  async login(email: string, password: string): Promise<boolean> {
+    const subdomain = this.extractSubdomain();
+    
+    try {
+      const response = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Tenant-Subdomain': subdomain || '',
+        },
+        body: JSON.stringify({ email, password }),
+        credentials: 'include',
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        this.user = data.user;
+        return true;
+      }
+    } catch (error) {
+      console.error('خطأ في تسجيل الدخول:', error);
+    }
+    
+    return false;
+  }
+}
+
+// hooks/useTenant.ts - React Hook لإدارة العميل
+import { useState, useEffect, useContext, createContext } from 'react';
+
+interface TenantContextType {
+  tenant: Tenant | null;
+  user: TenantUser | null;
+  loading: boolean;
+  error: string | null;
+  hasFeature: (feature: string) => boolean;
+  hasPermission: (permission: string) => boolean;
+  login: (email: string, password: string) => Promise<boolean>;
+  logout: () => Promise<void>;
+}
+
+const TenantReactContext = createContext<TenantContextType | null>(null);
+
+// Provider للعميل
+export function TenantProvider({ children }: { children: React.ReactNode }) {
+  const [tenant, setTenant] = useState<Tenant | null>(null);
+  const [user, setUser] = useState<TenantUser | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  
+  // تحميل معلومات العميل عند بداية التطبيق
+  useEffect(() => {
+    loadTenantData();
+  }, []);
+  
+  const loadTenantData = async () => {
+    try {
+      setLoading(true);
+      const tenantContext = TenantContext.getInstance();
+      const tenantData = await tenantContext.loadTenant();
+      setTenant(tenantData);
+      
+      // تحميل معلومات المستخدم إذا كان مسجل دخول
+      await loadUserData();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'خطأ غير معروف');
+    } finally {
+      setLoading(false);
+    }
+  };
+  
+  const loadUserData = async () => {
+    try {
+      const response = await fetch('/api/auth/me', {
+        credentials: 'include',
+      });
+      
+      if (response.ok) {
+        const userData = await response.json();
+        setUser(userData);
+      }
+    } catch (error) {
+      // المستخدم غير مسجل دخول
+    }
+  };
+  
+  const hasFeature = (feature: string): boolean => {
+    return tenant?.features[feature] || false;
+  };
+  
+  const hasPermission = (permission: string): boolean => {
+    return user?.permissions.includes(permission) || false;
+  };
+  
+  const login = async (email: string, password: string): Promise<boolean> => {
+    try {
+      const tenantContext = TenantContext.getInstance();
+      const success = await tenantContext.login(email, password);
+      
+      if (success) {
+        await loadUserData();
+      }
+      
+      return success;
+    } catch (error) {
+      setError('خطأ في تسجيل الدخول');
+      return false;
+    }
+  };
+  
+  const logout = async () => {
+    try {
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+        credentials: 'include',
+      });
+      
+      setUser(null);
+    } catch (error) {
+      console.error('خطأ في تسجيل الخروج:', error);
+    }
+  };
+  
+  const value: TenantContextType = {
+    tenant,
+    user,
+    loading,
+    error,
+    hasFeature,
+    hasPermission,
+    login,
+    logout,
+  };
+  
+  return (
+    <TenantReactContext.Provider value={value}>
+      {children}
+    </TenantReactContext.Provider>
+  );
+}
+
+// Hook لاستخدام سياق العميل
+export function useTenant() {
+  const context = useContext(TenantReactContext);
+  if (!context) {
+    throw new Error('useTenant يجب استخدامه داخل TenantProvider');
+  }
+  return context;
+}
+
+// components/FeatureGate.tsx - مكون للتحكم في عرض الميزات
+interface FeatureGateProps {
+  feature: string;
+  children: React.ReactNode;
+  fallback?: React.ReactNode;
+}
+
+export function FeatureGate({ feature, children, fallback }: FeatureGateProps) {
+  const { hasFeature } = useTenant();
+  
+  if (hasFeature(feature)) {
+    return <>{children}</>;
+  }
+  
+  return <>{fallback || null}</>;
+}
+
+// components/PermissionGate.tsx - مكون للتحكم في الصلاحيات
+interface PermissionGateProps {
+  permission: string;
+  children: React.ReactNode;
+  fallback?: React.ReactNode;
+}
+
+export function PermissionGate({ permission, children, fallback }: PermissionGateProps) {
+  const { hasPermission } = useTenant();
+  
+  if (hasPermission(permission)) {
+    return <>{children}</>;
+  }
+  
+  return <>{fallback || <div>ليس لديك الصلاحية للوص
